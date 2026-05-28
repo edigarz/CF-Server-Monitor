@@ -93,11 +93,23 @@ export async function initDatabase(db) {
       )
     `).run();
 
-    // 为历史数据表创建覆盖索引，加速查询并减少扫描行数
+    // 清理旧的覆盖索引（INCLUDE 列会显著增大索引体积，在高写入的 metrics 场景下弊大于利）
+    const existingIndexes = await db.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'metrics_history'`
+    ).all();
+    const hasOldIndex = existingIndexes.results.some(
+      idx => idx.name === 'idx_history_server_time_covering'
+    );
+    if (hasOldIndex) {
+      await db.prepare(`DROP INDEX IF EXISTS idx_history_server_time_covering`).run();
+      console.log('✅ 已删除旧的覆盖索引，减少索引体积和写入放大');
+    }
+
+    // 为历史数据表创建紧凑索引，只包含查询条件列
+    // 在 metrics/时间序列场景中，回表开销远小于大索引带来的写入放大和缓存效率下降
     await db.prepare(`
-      CREATE INDEX IF NOT EXISTS idx_history_server_time_covering 
-      ON metrics_history(server_id, timestamp) 
-      INCLUDE (cpu, ram, disk, processes, net_in_speed, net_out_speed, tcp_conn, udp_conn, ping_ct, ping_cu, ping_cm, ping_bd)
+      CREATE INDEX IF NOT EXISTS idx_history_server_time 
+      ON metrics_history(server_id, timestamp)
     `).run();
 
     // 数据库列迁移（兼容旧版本）

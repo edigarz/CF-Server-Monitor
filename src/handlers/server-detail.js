@@ -718,7 +718,7 @@ export async function handleServerDetail(request, env, sys, viewId) {
         <span>Last update: <span id="last-update">just now</span></span>
       </div>
       <div class="status-bar-item">
-        <span>Auto-refresh: 5s (status) / 60s (history)</span>
+        <span>Auto-refresh: 60s (status)</span>
       </div>
       <div class="status-bar-item">
         <span>Shortcut: Ctrl+R to refresh</span>
@@ -734,7 +734,6 @@ export async function handleServerDetail(request, env, sys, viewId) {
     // =============================================
     const serverId = "${viewId}";
     let currentHours = 1;
-    let historyTimer = null;
     let statusTimer = null;
     
     // 格式化工具
@@ -1182,27 +1181,36 @@ export async function handleServerDetail(request, env, sys, viewId) {
     // =============================================
     // 获取当前状态
     // =============================================
+    function appendDataToChart(chart, datasetIndex, timestamp, value) {
+      const dataset = chart.data.datasets[datasetIndex];
+      const time = new Date(timestamp).getTime();
+      const cutoffTime = Date.now() - currentHours * 60 * 60 * 1000;
+      
+      dataset.data.push({ x: time, y: parseFloat(value) || 0 });
+      
+      dataset.data = dataset.data.filter(d => d.x >= cutoffTime);
+      
+      chart.update('none');
+    }
+    
     async function fetchCurrentStatus() {
       try {
         const res = await fetch('/api/server?id=' + serverId);
         if (!res.ok) return;
         const data = await res.json();
         
-        // 更新状态徽章
         const lastUpdatedTime = new Date(data.last_updated).getTime();
         const isOnline = (Date.now() - lastUpdatedTime) < 120000;
         const badge = document.getElementById('head-status');
         badge.innerHTML = \`<span class="pulse-dot \${isOnline ? 'online' : 'offline'}"></span>\${isOnline ? 'ONLINE' : 'OFFLINE'}\`;
         badge.className = 'status-badge ' + (isOnline ? 'online' : 'offline');
         
-        // 更新国旗
         const cCode = (data.country || 'xx').toLowerCase();
         const flagHtml = cCode !== 'xx' 
           ? \`<img src="https://flagcdn.com/24x18/\${cCode}.png" alt="\${cCode}" style="vertical-align: middle; margin-right: 6px; border-radius: 2px; filter: brightness(0.9);">\` 
           : '🏳️ ';
         document.getElementById('head-flag').innerHTML = flagHtml;
         
-        // 更新实时数值
         document.getElementById('text-cpu').innerText = (parseFloat(data.cpu) || 0).toFixed(1) + '%';
         document.getElementById('text-ram').innerText = (parseFloat(data.ram) || 0).toFixed(1) + '%';
         document.getElementById('text-disk').innerText = (parseFloat(data.disk) || 0).toFixed(1) + '%';
@@ -1212,7 +1220,6 @@ export async function handleServerDetail(request, env, sys, viewId) {
         document.getElementById('text-tcp').innerText = data.tcp_conn || '0';
         document.getElementById('text-udp').innerText = data.udp_conn || '0';
         
-        // 更新流量和最后上报时间
         document.getElementById('val-traffic-in').innerText = formatBytes(data.monthly_rx);
         document.getElementById('val-traffic-out').innerText = formatBytes(data.monthly_tx);
         document.getElementById('val-last-report').innerText = new Date(lastUpdatedTime).toLocaleString(undefined, { hour12: false });
@@ -1227,7 +1234,6 @@ export async function handleServerDetail(request, env, sys, viewId) {
         document.getElementById('t-cm').innerText = data.ping_cm + 'ms';
         document.getElementById('t-bd').innerText = data.ping_bd + 'ms';
         
-        // 更新信息面板
         document.getElementById('val-uptime').innerText = data.uptime || 'N/A';
         document.getElementById('val-arch').innerText = data.arch || 'N/A';
         document.getElementById('val-os').innerText = data.os || 'N/A';
@@ -1236,6 +1242,22 @@ export async function handleServerDetail(request, env, sys, viewId) {
         document.getElementById('val-boot').innerText = data.boot_time || 'N/A';
         document.getElementById('val-ram-total').innerText = (parseFloat(data.ram_total)/1024).toFixed(1) + ' GiB';
         document.getElementById('val-disk-total').innerText = (parseFloat(data.disk_total)/1024).toFixed(1) + ' GiB';
+        
+        const dataTimestamp = new Date(data.last_updated).getTime();
+        appendDataToChart(charts.cpu, 0, dataTimestamp, data.cpu);
+        appendDataToChart(charts.ram, 0, dataTimestamp, data.ram);
+        appendDataToChart(charts.disk, 0, dataTimestamp, data.disk);
+        appendDataToChart(charts.proc, 0, dataTimestamp, data.processes);
+        appendDataToChart(charts.net, 0, dataTimestamp, data.net_in_speed);
+        appendDataToChart(charts.net, 1, dataTimestamp, data.net_out_speed);
+        appendDataToChart(charts.conn, 0, dataTimestamp, data.tcp_conn);
+        appendDataToChart(charts.conn, 1, dataTimestamp, data.udp_conn);
+        appendDataToChart(charts.ping, 0, dataTimestamp, data.ping_ct);
+        appendDataToChart(charts.ping, 1, dataTimestamp, data.ping_cu);
+        appendDataToChart(charts.ping, 2, dataTimestamp, data.ping_cm);
+        appendDataToChart(charts.ping, 3, dataTimestamp, data.ping_bd);
+        
+        document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
         
       } catch (e) {
         console.error('[ERROR] 获取状态失败:', e);
@@ -1272,21 +1294,14 @@ export async function handleServerDetail(request, env, sys, viewId) {
     function init() {
       console.log(\`\n╔══════════════════════════════════════╗\n║   Server Monitor Terminal    ║\n║   Connected to: \${serverId.padEnd(20)}║\n╚══════════════════════════════════════╝\`);
       
-      // 初始加载
       fetchCurrentStatus();
       loadAllHistory(currentHours);
       
-      // 定时刷新状态 (1分钟)
       statusTimer = setInterval(fetchCurrentStatus, 60000);
-      
-      // 定时刷新历史数据 (1分钟)
-      historyTimer = setInterval(() => loadAllHistory(currentHours), 60000);
     }
     
-    // 页面卸载时清理定时器
     window.addEventListener('beforeunload', () => {
       if (statusTimer) clearInterval(statusTimer);
-      if (historyTimer) clearInterval(historyTimer);
       console.log('[INFO] Connection closed');
     });
     
