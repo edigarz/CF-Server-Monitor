@@ -5,7 +5,7 @@ import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate, handleWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
-import { loadSettings, loadSiteSettings, setDebug } from './utils/settings.js';
+import { loadSettings, loadSiteSettings, setDebug, debug } from './utils/settings.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
 import { getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from './utils/cache.js';
 import { AppError, createSuccessResponse, createUnauthorizedResponse, createBadRequestResponse, createNotFoundResponse, createErrorResponse } from './utils/errors.js';
@@ -31,7 +31,7 @@ async function getEncryptionKey(env) {
   return keyMaterial;
 }
 
-async function encryptCookieData(data, env) {
+async function encryptTurnstileData(data, env) {
   const key = await getEncryptionKey(env);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encoder = new TextEncoder();
@@ -47,7 +47,7 @@ async function encryptCookieData(data, env) {
   return btoa(String.fromCharCode(...combined));
 }
 
-async function decryptCookieData(encoded, env) {
+async function decryptTurnstileData(encoded, env) {
   try {
     const key = await getEncryptionKey(env);
     const decoded = new Uint8Array(atob(encoded).split('').map(c => c.charCodeAt(0)));
@@ -61,7 +61,7 @@ async function decryptCookieData(encoded, env) {
     const encoder = new TextDecoder();
     return JSON.parse(encoder.decode(decrypted));
   } catch (e) {
-    console.error('Cookie decryption error:', e);
+    debug('Cookie decryption error:', e);
     return null;
   }
 }
@@ -72,7 +72,7 @@ async function isTurnstileVerified(request, env) {
   if (!verifiedHeader) return false;
   
   try {
-    const decrypted = await decryptCookieData(verifiedHeader, env);
+    const decrypted = await decryptTurnstileData(verifiedHeader, env);
     return decrypted && decrypted.expires && Date.now() < decrypted.expires * 1000;
   } catch {
     return false;
@@ -113,7 +113,7 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
   } catch (e) {
     const message = e && e.message ? e.message : String(e);
     if (/no such column/i.test(message)) {
-      console.warn('[History] 数据库字段缺失，可能尚未升级数据库:', message);
+      debug('[History] 数据库字段缺失，可能尚未升级数据库:', message);
       return new Response(JSON.stringify({
         code: 'DATABASE_UPGRADE_REQUIRED'
       }), {
@@ -176,7 +176,7 @@ export default {
       return false;
     };
 
-    let setTurnstileCookie = false;
+    let setTurnstileVerified = false;
     let sys = null;
 
     if (isApiRequest && !isTurnstileBypassed(path)) {
@@ -196,7 +196,7 @@ export default {
             return applyCors(response, request, corsAllowedOrigins);
           }
           
-          setTurnstileCookie = true;
+          setTurnstileVerified = true;
         }
       }
     }
@@ -228,11 +228,11 @@ export default {
 
         if (turnstileEnabled) {
           verified = await isTurnstileVerified(request, env);
-          if (setTurnstileCookie) {
+          if (setTurnstileVerified) {
             verified = true;
             const expires = Math.floor(Date.now() / 1000) + 3600;
             const cookieData = { expires, verified: true, timestamp: Date.now() };
-            turnstileVerified = await encryptCookieData(cookieData, env);
+            turnstileVerified = await encryptTurnstileData(cookieData, env);
           }
         }
 
@@ -292,10 +292,10 @@ export default {
           return response;
         }
 
-        if (setTurnstileCookie) {
+        if (setTurnstileVerified) {
           const expires = Math.floor(Date.now() / 1000) + 3600;
           const cookieData = { expires, verified: true, timestamp: Date.now() };
-          const encryptedData = await encryptCookieData(cookieData, env);
+          const encryptedData = await encryptTurnstileData(cookieData, env);
 
           const finalHeaders = new Headers(response.headers);
           finalHeaders.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '');
@@ -320,47 +320,47 @@ export default {
 
   async scheduled(event, env, ctx) {
     const cron = event.cron;
-    console.debug(`[Cron] 定时任务触发: ${cron}`);
+    debug(`[Cron] 定时任务触发: ${cron}`);
     
     if (cron === '*/1 * * * *') {
-      console.debug('[Cron] 开始执行离线节点检测');
+      debug('[Cron] 开始执行离线节点检测');
       await checkOfflineNodes(env.DB);
-      console.debug('[Cron] 离线节点检测完成');
+      debug('[Cron] 离线节点检测完成');
     } else if (cron === '0 * * * *') {
       const now = new Date();
       const day = now.getUTCDate();
       const hour = now.getUTCHours();
       
       if (day === 1 && hour === 0) {
-        console.debug('[Cron] 开始执行每月数据清理任务（表轮换）');
+        debug('[Cron] 开始执行每月数据清理任务（表轮换）');
         await monthlyCleanup(env.DB);
-        console.debug('[Cron] 每月数据清理任务完成');
+        debug('[Cron] 每月数据清理任务完成');
       }
       
       if (day === 8 && hour === 0) {
-        console.debug('[Cron] 开始执行每月8号清理旧表任务');
+        debug('[Cron] 开始执行每月8号清理旧表任务');
         await dropMetricsHistoryOld(env.DB);
-        console.debug('[Cron] 每月8号清理旧表任务完成');
+        debug('[Cron] 每月8号清理旧表任务完成');
       }
       
       if (hour === 12) {
-        console.debug('[Cron] 开始执行服务器到期检测');
+        debug('[Cron] 开始执行服务器到期检测');
         await checkExpiringServers(env.DB);
-        console.debug('[Cron] 服务器到期检测完成');
+        debug('[Cron] 服务器到期检测完成');
       }
     }else if(env.DEBUG == 1){
       if (cron === '* * 1 * *') {
-        console.debug('[Cron DEBUG] 开始执行每月数据清理任务（表轮换）');
+        debug('[Cron DEBUG] 开始执行每月数据清理任务（表轮换）');
         await monthlyCleanup(env.DB);
-        console.debug('[Cron DEBUG] 每月数据清理任务完成');
+        debug('[Cron DEBUG] 每月数据清理任务完成');
       } else if (cron === '* * 8 * *') {
-        console.debug('[Cron DEBUG] 开始执行每月8号清理旧表任务');
+        debug('[Cron DEBUG] 开始执行每月8号清理旧表任务');
         await dropMetricsHistoryOld(env.DB);
-        console.debug('[Cron DEBUG] 每月8号清理旧表任务完成');
+        debug('[Cron DEBUG] 每月8号清理旧表任务完成');
       } else if (cron === '0 12 * * *') {
-        console.debug('[Cron DEBUG] 开始执行服务器到期检测');
+        debug('[Cron DEBUG] 开始执行服务器到期检测');
         await checkExpiringServers(env.DB);
-        console.debug('[Cron DEBUG] 服务器到期检测完成');
+        debug('[Cron DEBUG] 服务器到期检测完成');
       }
     }
   }
